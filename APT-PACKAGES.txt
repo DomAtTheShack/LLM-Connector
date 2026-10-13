@@ -1,0 +1,44 @@
+HamProof - apt packages needed (Ubuntu / WSL)
+==============================================
+
+Install everything at once:
+
+    sudo apt update
+    sudo apt install build-essential cmake ninja-build gdb pkg-config autoconf automake \
+        libasound2-dev libsndfile1-dev libfftw3-dev libpulse-dev libsndio-dev \
+        alsa-utils libasound2-plugins pulseaudio-utils
+
+
+What each one is for
+--------------------
+
+Building HamProof (CMakeLists.txt)
+    build-essential      g++, make and the C/C++ standard headers
+    cmake                CMakeLists.txt asks for CMake 4.1 or newer
+    ninja-build          Build tool CLion uses by default
+    gdb                  Debugger for CLion
+    libasound2-dev       ALSA headers + library (alsa/asoundlib.h, find_package(ALSA))
+
+Building minimodem (minimodem/install-dependencies-linux.sh)
+    pkg-config           Lets ./configure find the libraries below
+    autoconf, automake   Generate ./configure (autoreconf -i)
+    libfftw3-dev         FFT library minimodem decodes with (required)
+    libsndfile1-dev      Reading .wav files (hamproof file.wav)
+    libasound2-dev       ALSA input (--alsa=...)
+    libpulse-dev         PulseAudio input (minimodem's default under WSLg)
+    libsndio-dev         sndio input (optional, script installs it)
+
+Audio under WSL
+    alsa-utils           arecord / aplay, to test the mic:  arecord -D default -d 5 test.wav
+    libasound2-plugins   ALSA "pulse" plugin, so ALSA "default" reaches the Windows mic via WSLg
+    pulseaudio-utils     pactl, to check what WSLg exposes:  pactl list sources short
+
+
+Building minimodem after the packages are installed
+---------------------------------------------------
+
+    cd minimodem
+    autoreconf -i
+    ./configure
+    make
+    sudo make install        # installs /usr/local/bin/minimodem, the path main.cpp runs
