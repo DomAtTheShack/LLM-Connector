@@ -44,7 +44,7 @@ unique_ptr<Cat> chooseRadio() {
     labels.insert(labels.end(), ports.begin(), ports.end());
     labels.emplace_back("Type a port...");
     int choice = requireSelection(ansi::selectWith(
-        "Select the radio's CAT port for PTT", static_cast<int>(labels.size()),
+        "Select the radio's CAT port", static_cast<int>(labels.size()),
         [&](int i) { return labels[i]; }));
     if (choice == 0) return nullptr;
 
@@ -96,9 +96,18 @@ int main(int argc, char** argv) {
         }
     }
 
+#ifndef _WIN32
+    // minimodem keeps only a bit or so of audio queued while transmitting, which isn't
+    // enough to ride out the jitter of PulseAudio under WSLg (and virtual cables), so the
+    // stream underruns and gaps the tone. libpulse reads this when minimodem opens its
+    // stream, through the ALSA pulse plugin or directly, and buffers that much instead.
+    // An existing value is kept so it can be tuned from the shell
+    setenv("PULSE_LATENCY_MSEC", "100", 0);
+#endif
+
     ansi::setRawMode(true);
     ansi::clearScreen();
-    ansi::print(ansi::Color::BrightGreen, "Welcome to the RTTY Ham Proof\nPress any key to continue...\n");
+    ansi::print(ansi::Color::BrightGreen, "Welcome to the RTTY-Connector Program\nPress any key to continue...\n");
     ansi::flush();
     std::getchar();
 
@@ -195,6 +204,12 @@ int main(int argc, char** argv) {
         // default in Windows sound settings
         (void)audioDevice;
         return vector<string>{};
+#elif defined(__APPLE__)
+        // Homebrew's minimodem only has PulseAudio and opens the default device. libpulse
+        // takes the device from these variables instead, and minimodem inherits them; Rx
+        // only reads PULSE_SOURCE and Tx only PULSE_SINK, so duplex can set both
+        setenv(playback ? "PULSE_SINK" : "PULSE_SOURCE", audioDevice.name.c_str(), 1);
+        return vector<string>{};
 #else
         // minimodem turns a name without ':' into "plughw:<name>" (a hardware card), so
         // wrap names like "default" or "pulse" in the plug plugin to keep them as-is
@@ -220,8 +235,9 @@ int main(int argc, char** argv) {
         rxAudioArgs = chooseAudioDevice(os::AudioDirection::Capture, "Select an audio device");
     }
 
-    unique_ptr<Cat> duplexRadio;
-    if (duplex) duplexRadio = chooseRadio();
+    // Anything that goes on the air can key the radio over CAT; writing a file can't
+    unique_ptr<Cat> radio;
+    if (duplex || (transmitting && inputFile.empty())) radio = chooseRadio();
 
     // The minimodem command line for one direction
     auto minimodemArgs = [&](bool tx, const vector<string>& audioArgs) {
@@ -266,7 +282,7 @@ int main(int argc, char** argv) {
         ansi::print(ansi::Color::BrightGreen, "\n");
         if (shiftFit(shift, baud) != ShiftFit::Comfortable) {
             ansi::print(ansi::Color::BrightRed, "Warning: a %g Hz shift is narrow for %s baud; "
-                        "use at least %g Hz for clean copy\n", shift, baudStr, 2.0f * baud);
+                        "use at least %g Hz for clean radio\n", shift, baudStr, 2.0f * baud);
         }
     }else {
         ansi::print(ansi::Color::BrightGreen, "Baud 1200 | Bell202 1200 bps\n");
@@ -274,17 +290,34 @@ int main(int argc, char** argv) {
 
     if (duplex) {
         int status = runDuplex(minimodemArgs(true, txAudioArgs), minimodemArgs(false, rxAudioArgs),
-                               duplexRadio.get());
-        duplexRadio.reset();   // exit() skips destructors, and the radio's port should be closed
+                               radio.get());
+        radio.reset();   // exit() skips destructors, and the radio's port should be closed
         exit(status);
     }
 
     if (transmitting) {
-        ansi::print(ansi::Color::BrightGreen, "Type a line and press Enter to send it; Ctrl-D ends the transmission\n");
+        if (inputFile.empty()) {
+            ansi::print(ansi::Color::BrightGreen, "PTT: %s\n",
+                        radio ? "CAT" : "VOX (the radio keys itself on the audio)");
+        }
+        ansi::print(ansi::Color::BrightGreen, "Type here; Ctrl-D ends the program\n");
     }
 
     std::printf("\n");
     ansi::flush();
+
+    // The radio stays keyed for as long as minimodem transmits. Ctrl-C then only stops
+    // minimodem, so we're still here afterwards to unkey it
+    if (radio) {
+        os::catchInterrupt(true);
+        try {
+            radio->setPtt(true);
+        } catch (const exception& e) {
+            fprintf(stderr, "Cannot key the radio: %s\n", e.what());
+            radio.reset();
+            exit(EXIT_FAILURE);
+        }
+    }
 
     // Show minimodem's output as it arrives
     int status = os::runAndPipe(minimodemArgs(transmitting, transmitting ? txAudioArgs : rxAudioArgs),
@@ -292,6 +325,18 @@ int main(int argc, char** argv) {
         fwrite(chunk.data(), 1, chunk.size(), stdout);
         fflush(stdout);
     });
+
+    if (radio) {
+        try {
+            radio->setPtt(false);
+        } catch (const exception& e) {
+            ansi::print(ansi::Color::BrightRed, "Cannot unkey the radio: %s - it may still be "
+                        "transmitting!\n", e.what());
+            status = -1;
+        }
+        radio.reset();   // exit() skips destructors, and the radio's port should be closed
+        os::catchInterrupt(false);
+    }
 
     exit(status == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }

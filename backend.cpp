@@ -1,4 +1,4 @@
-// backend.cpp - Windows and Linux implementations of backend.h.
+// backend.cpp - Windows, Linux and macOS implementations of backend.h.
 // Shared code comes first, then one #ifdef block per OS.
 #include "backend.h"
 
@@ -19,12 +19,17 @@
     #include <mmsystem.h>
     #include <io.h>
 #else
-    #include <alsa/asoundlib.h>
+    #ifdef __APPLE__
+        #include <pulse/pulseaudio.h>
+    #else
+        #include <alsa/asoundlib.h>
+    #endif
     #include <cerrno>
     #include <csignal>
     #include <fcntl.h>
     #include <glob.h>
     #include <poll.h>
+    #include <signal.h>
     #include <sys/wait.h>
     #include <termios.h>
     #include <unistd.h>
@@ -428,14 +433,28 @@ const char* minimodemPath() {
     return path.c_str();
 }
 
+namespace {
+BOOL WINAPI swallowInterrupt(DWORD type) {
+    return type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
+}
+} // namespace
+
+// Children share our console, so they still get Ctrl-C. Unlike a null handler (which
+// children inherit), a handler function only applies to us
+void catchInterrupt(bool enable) {
+    SetConsoleCtrlHandler(swallowInterrupt, enable ? TRUE : FALSE);
+}
+
 #else
-// ==== Linux ===================================================================
+// ==== Linux and macOS =========================================================
 
 namespace {
 
 std::string errnoMessage(const std::string& what, int err) {
     return what + ": " + std::strerror(err);
 }
+
+#ifndef __APPLE__
 
 // ALSA descriptions span several lines, e.g. "HDA Intel PCH, ALC892 Analog\nFront speakers".
 // Joins the non-empty lines into one: "HDA Intel PCH, ALC892 Analog - Front speakers"
@@ -478,6 +497,7 @@ bool canOpen(const char* name, snd_pcm_stream_t stream) {
     close(savedStderr);
     return ok;
 }
+#endif
 
 } // namespace
 
@@ -650,6 +670,58 @@ void Process::kill() {
     if (pid != -1) ::kill(pid, SIGTERM);
 }
 
+#ifdef __APPLE__
+namespace {
+
+void addSource(pa_context*, const pa_source_info* info, int eol, void* userdata) {
+    // Monitors replay what an output is playing; they aren't microphones or line-ins
+    if (eol || info->monitor_of_sink != PA_INVALID_INDEX) return;
+    static_cast<std::vector<AudioDevice>*>(userdata)->push_back(
+        {info->name, info->description ? info->description : info->name});
+}
+
+void addSink(pa_context*, const pa_sink_info* info, int eol, void* userdata) {
+    if (eol) return;
+    static_cast<std::vector<AudioDevice>*>(userdata)->push_back(
+        {info->name, info->description ? info->description : info->name});
+}
+
+} // namespace
+
+// Homebrew's minimodem only has PulseAudio, so list what the PulseAudio server offers
+// (it picks up the Mac's CoreAudio devices). The names are what PULSE_SOURCE/PULSE_SINK take
+std::vector<AudioDevice> listAudioDevices(AudioDirection direction) {
+    std::vector<AudioDevice> devices;
+    pa_mainloop* loop = pa_mainloop_new();
+    pa_context* context = pa_context_new(pa_mainloop_get_api(loop), "RTTY-Connector");
+
+    bool ready = context && pa_context_connect(context, nullptr, PA_CONTEXT_NOFLAGS, nullptr) >= 0;
+    while (ready && pa_context_get_state(context) != PA_CONTEXT_READY) {
+        if (!PA_CONTEXT_IS_GOOD(pa_context_get_state(context)) ||
+            pa_mainloop_iterate(loop, 1, nullptr) < 0) ready = false;
+    }
+
+    if (ready) {
+        pa_operation* op = direction == AudioDirection::Capture
+                               ? pa_context_get_source_info_list(context, addSource, &devices)
+                               : pa_context_get_sink_info_list(context, addSink, &devices);
+        while (op && pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
+            if (pa_mainloop_iterate(loop, 1, nullptr) < 0) break;
+        }
+        if (op) pa_operation_unref(op);
+    } else {
+        std::cerr << "Error: Cannot reach PulseAudio. Start it with: brew services start pulseaudio"
+                  << std::endl;
+    }
+
+    if (context) {
+        pa_context_disconnect(context);
+        pa_context_unref(context);
+    }
+    pa_mainloop_free(loop);
+    return devices;
+}
+#else
 std::vector<AudioDevice> listAudioDevices(AudioDirection direction) {
     std::vector<AudioDevice> devices;
     snd_pcm_stream_t stream = direction == AudioDirection::Capture
@@ -683,6 +755,7 @@ std::vector<AudioDevice> listAudioDevices(AudioDirection direction) {
     snd_device_name_free_hint(hints);
     return devices;
 }
+#endif
 
 bool fileExists(const std::string& path)   { return access(path.c_str(), F_OK) == 0; }
 bool fileReadable(const std::string& path) { return access(path.c_str(), R_OK) == 0; }
@@ -731,9 +804,17 @@ bool waitForInput(int timeoutMs) {
 
 std::vector<std::string> listSerialPorts() {
     std::vector<std::string> ports;
+#ifdef __APPLE__
+    // USB serial adapters (FTDI, CP210x, CH340) and radios with built-in USB. The cu.*
+    // ("call-up") devices open straight away; tty.* ones wait for a carrier-detect signal
+    const char* patterns[] = {"/dev/cu.usbserial*", "/dev/cu.usbmodem*",
+                              "/dev/cu.SLAB_USBtoUART*", "/dev/cu.wchusbserial*"};
+#else
     // USB serial adapters and radios with built-in USB. ttyS* are left out: Linux creates
     // them whether or not anything is there
-    for (const char* pattern : {"/dev/ttyUSB*", "/dev/ttyACM*"}) {
+    const char* patterns[] = {"/dev/ttyUSB*", "/dev/ttyACM*"};
+#endif
+    for (const char* pattern : patterns) {
         glob_t matches;
         if (glob(pattern, 0, nullptr, &matches) == 0) {
             for (size_t i = 0; i < matches.gl_pathc; i++) ports.emplace_back(matches.gl_pathv[i]);
@@ -743,10 +824,48 @@ std::vector<std::string> listSerialPorts() {
     return ports;
 }
 
-void enableAnsiEscapes() {}   // Linux terminals handle them already
+void enableAnsiEscapes() {}   // Linux and macOS terminals handle them already
+
+namespace {
+
+// PATH first, then where `make install` (/usr/local) and Homebrew on Apple Silicon
+// (/opt/homebrew) put it
+std::string findMinimodem() {
+    std::vector<std::string> dirs;
+    if (const char* path = getenv("PATH")) {
+        std::string list = path;
+        size_t start = 0, end;
+        while ((end = list.find(':', start)) != std::string::npos) {
+            dirs.push_back(list.substr(start, end - start));
+            start = end + 1;
+        }
+        dirs.push_back(list.substr(start));
+    }
+    dirs.insert(dirs.end(), {"/usr/local/bin", "/opt/homebrew/bin"});
+    for (const std::string& dir : dirs) {
+        if (dir.empty()) continue;
+        std::string candidate = dir + "/minimodem";
+        if (access(candidate.c_str(), X_OK) == 0) return candidate;
+    }
+    return "/usr/local/bin/minimodem";   // start() then reports it can't be found
+}
+
+void swallowInterrupt(int) {}
+
+} // namespace
 
 const char* minimodemPath() {
-    return "/usr/local/bin/minimodem";
+    static const std::string path = findMinimodem();
+    return path.c_str();
+}
+
+// A handler function rather than SIG_IGN: exec resets handlers to the default, so the
+// programs we start still stop on Ctrl-C, but an ignored signal would stay ignored in them
+void catchInterrupt(bool enable) {
+    struct sigaction action{};
+    action.sa_handler = enable ? swallowInterrupt : SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGINT, &action, nullptr);
 }
 
 #endif

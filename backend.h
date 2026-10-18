@@ -1,7 +1,7 @@
-// backend.h - OS abstraction layer. Everything that differs between Windows and Linux
-// (running programs, pipes, audio devices, file checks, terminal modes) goes through here,
-// so the rest of HamProof calls the same functions on either OS.
-// The implementations for both live in backend.cpp.
+// backend.h - OS abstraction layer. Everything that differs between Windows, Linux and
+// macOS (running programs, pipes, audio devices, file checks, terminal modes) goes through
+// here, so the rest of HamProof calls the same functions on every OS.
+// The implementations live in backend.cpp.
 #ifndef HAMPROOF_BACKEND_H
 #define HAMPROOF_BACKEND_H
 
@@ -65,7 +65,9 @@ enum class AudioDirection { Capture, Playback };
 
 // A sound device: the name used to open it plus the text shown in the menu
 struct AudioDevice {
-    std::string name;   // Linux: ALSA name, e.g. "plughw:CARD=PCH,DEV=0". Windows: WinMM index
+    // Linux: ALSA name, e.g. "plughw:CARD=PCH,DEV=0". macOS: PulseAudio sink/source name.
+    // Windows: WinMM index
+    std::string name;
     std::string desc;   // e.g. "HDA Intel PCH, ALC892 Analog - Front speakers"
 };
 
@@ -74,7 +76,8 @@ std::vector<AudioDevice> listAudioDevices(AudioDirection direction);
 
 // ---- Serial ports ------------------------------------------------------------
 
-// Ports a radio's CAT could be on. Windows: "COM5". Linux: "/dev/ttyUSB0", "/dev/ttyACM0"
+// Ports a radio's CAT could be on. Windows: "COM5". Linux: "/dev/ttyUSB0", "/dev/ttyACM0".
+// macOS: "/dev/cu.usbserial-110", "/dev/cu.usbmodem1101"
 std::vector<std::string> listSerialPorts();
 
 // ---- Files -------------------------------------------------------------------
@@ -96,8 +99,11 @@ void setInterruptKey(bool enable);
 int readInputByte();
 // True once readInputByte() has something to return, false after timeoutMs without
 bool waitForInput(int timeoutMs);
-// Lets the console understand ANSI escape codes (always true on Linux terminals)
+// Lets the console understand ANSI escape codes (always true on Linux/macOS terminals)
 void enableAnsiEscapes();
+// With enable true, Ctrl-C stops the programs we started but not us, so we can clean up
+// (e.g. unkey the radio) once they exit
+void catchInterrupt(bool enable);
 
 // ---- Misc --------------------------------------------------------------------
 

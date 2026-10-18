@@ -222,7 +222,6 @@ TurnEnd transmitTurn(const std::vector<std::string>& args, Cat* radio, EventQueu
                 // End of input: minimodem sends whatever it still has queued, then exits
                 modem.process.closeStdin();
                 finishing = true;
-                ansi::print(statusColor, "(finishing transmission...)\n");
                 break;
             case Key::Esc:
                 modem.process.kill();
@@ -253,7 +252,7 @@ TurnEnd transmitTurn(const std::vector<std::string>& args, Cat* radio, EventQueu
 
 TurnEnd receiveTurn(const std::vector<std::string>& args, EventQueue& events) {
     ansi::print(statusColor, ansi::Bold, "\n== RX ==");
-    ansi::print(statusColor, "  Back to Tx when the other station's carrier drops | "
+    ansi::print(statusColor, "  Receiving will switch on carrier drop | "
                 "Tab: Tx now | Esc: quit\n");
     ansi::flush();
 
@@ -313,5 +312,6 @@ int runDuplex(const std::vector<std::string>& txArgs, const std::vector<std::str
 
     ansi::setRawMode(false);   // Also turns the interrupt key back on
     std::printf("\n");
+    free(events);
     return end == TurnEnd::Quit ? 0 : 1;
 }

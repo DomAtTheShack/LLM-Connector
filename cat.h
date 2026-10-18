@@ -13,7 +13,7 @@
 // std::runtime_error with Hamlib's message if the radio rejects it or doesn't answer.
 class Cat {
 public:
-    // model: Hamlib model number (3087 = Xiegu X6100, 1 = dummy rig, 2 = rigctld)
+    // model: Hamlib model number (1 = dummy rig, 2 = rigctld)
     // port:  serial device (COM5, /dev/ttyACM0, /dev/pts/N) or host:port for model 2
     Cat(rig_model_t model, const std::string& port, int baud = 19200);
     ~Cat();
