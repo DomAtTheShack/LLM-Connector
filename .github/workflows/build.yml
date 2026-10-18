@@ -1,0 +1,218 @@
+name: Build
+
+# Every push and PR builds all three platforms. Every night (and on "Run workflow")
+# the builds are also published as the "nightly" GitHub release, replacing the last one.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 7 * * *"          # 07:00 UTC = 3 am Eastern (2 am in winter)
+  workflow_dispatch:
+
+permissions:
+  contents: write                # Needed to create the release
+
+concurrency:
+  group: build-${{ github.ref }}
+  # A newer push replaces a running PR build, but never cuts a nightly release short
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  HAMLIB_VERSION: "4.7.2"
+
+jobs:
+  # Skips the nightly when nothing was committed since the last one
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            last=$(gh api "repos/${{ github.repository }}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null || true)
+            if [ "$last" = "${{ github.sha }}" ]; then
+              echo "No new commits since the last nightly"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "release=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            unzip
+            zip
+
+      # The bundled Hamlib folder is in .gitignore, so fetch the same release
+      - name: Download Hamlib
+        run: |
+          curl -fsSLO "https://github.com/Hamlib/Hamlib/releases/download/${HAMLIB_VERSION}/hamlib-w64-${HAMLIB_VERSION}.zip"
+          echo "8553bc6c5c6032e8debf99c017e98f58fed7e07e7c25d04815dc3e8bbe3304c7  hamlib-w64-${HAMLIB_VERSION}.zip" | sha256sum -c
+          unzip -q "hamlib-w64-${HAMLIB_VERSION}.zip"
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAMPROOF_STATIC=ON
+          cmake --build build
+
+      - name: Check
+        run: build/cat_test.exe x 1
+
+      - name: Package
+        run: |
+          mkdir -p dist/RTTY-Connector
+          cp build/*.exe build/*.dll README.md LICENSE dist/RTTY-Connector/
+          cd dist && zip -qr RTTY-Connector-windows-x64.zip RTTY-Connector
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/RTTY-Connector-windows-x64.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build pkg-config libasound2-dev libusb-1.0-0-dev
+          # CMakeLists.txt asks for CMake 4.1 or newer, newer than Ubuntu's
+          pipx install cmake
+          cmake --version
+
+      # Hamlib built from source like on a dev machine, but static only so it ends up
+      # inside the binary. Cached, so this only takes minutes the first time
+      - name: Cache Hamlib
+        id: hamlib-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/hamlib
+          key: hamlib-${{ env.HAMLIB_VERSION }}-ubuntu-24.04-static
+
+      - name: Build Hamlib
+        if: steps.hamlib-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSLO "https://github.com/Hamlib/Hamlib/releases/download/${HAMLIB_VERSION}/hamlib-${HAMLIB_VERSION}.tar.gz"
+          echo "ae1fcf2dbc80ea0786ea8f047b09399c3f7737d1930442f61a031708ed33e88f  hamlib-${HAMLIB_VERSION}.tar.gz" | sha256sum -c
+          tar xzf "hamlib-${HAMLIB_VERSION}.tar.gz"
+          cd "hamlib-${HAMLIB_VERSION}"
+          ./configure --prefix="$HOME/hamlib" --disable-shared --enable-static --without-cxx-binding
+          make -j"$(nproc)"
+          make install
+
+      - name: Build
+        run: |
+          export PKG_CONFIG_PATH="$HOME/hamlib/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAMPROOF_STATIC=ON \
+                -DCMAKE_PREFIX_PATH="$HOME/hamlib"
+          cmake --build build
+
+      - name: Check
+        run: |
+          ldd build/HamProof
+          build/cat_test x 1
+
+      - name: Package
+        run: |
+          mkdir -p dist/RTTY-Connector
+          cp build/HamProof build/cat_test README.md LICENSE APT-PACKAGES.txt dist/RTTY-Connector/
+          tar -C dist -czf dist/RTTY-Connector-linux-x64.tar.gz RTTY-Connector
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/RTTY-Connector-linux-x64.tar.gz
+
+  macos:
+    runs-on: macos-latest        # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          # minimodem pulls in PulseAudio, which the device list links against
+          brew install cmake ninja pkgconf hamlib minimodem
+          cmake --version
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHAMPROOF_STATIC=ON
+          cmake --build build
+
+      - name: Check
+        run: |
+          otool -L build/HamProof
+          build/cat_test x 1
+
+      - name: Package
+        run: |
+          mkdir -p dist/RTTY-Connector
+          cp build/HamProof build/cat_test README.md LICENSE dist/RTTY-Connector/
+          tar -C dist -czf dist/RTTY-Connector-macos-arm64.tar.gz RTTY-Connector
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/RTTY-Connector-macos-arm64.tar.gz
+
+  release:
+    needs: [changes, windows, linux, macos]
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          short=$(echo "${{ github.sha }}" | cut -c1-7)
+          today=$(date -u +%Y-%m-%d)
+          cat > notes.md <<EOF
+          Automatic build of \`${short}\` from ${today}. Untested; may be broken.
+
+          **Windows:** unzip and run \`HamProof.exe\`. Keep the DLLs next to it. minimodem
+          has to be installed separately (Cygwin build).
+
+          **Linux:** \`tar xzf\`, then \`./HamProof\`. Needs ALSA, libusb and minimodem
+          (see APT-PACKAGES.txt).
+
+          **macOS (Apple Silicon):** \`brew install hamlib minimodem && brew services start pulseaudio\`,
+          then \`tar xzf\` and \`./HamProof\`. If macOS blocks it, run
+          \`xattr -d com.apple.quarantine HamProof cat_test\` first.
+          EOF
+          # Replace the previous nightly (release and tag) with this one
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly dist/* \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "Nightly ${today} (${short})" \
+            --notes-file notes.md
