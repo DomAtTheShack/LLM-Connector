@@ -6,6 +6,7 @@ Install everything at once:
     sudo apt update
     sudo apt install build-essential cmake ninja-build gdb pkg-config autoconf automake \
         libasound2-dev libsndfile1-dev libfftw3-dev libpulse-dev libsndio-dev \
+        libusb-1.0-0-dev libudev-dev \
         alsa-utils libasound2-plugins pulseaudio-utils
 
 
@@ -18,6 +19,8 @@ Building HamProof (CMakeLists.txt)
     ninja-build          Build tool CLion uses by default
     gdb                  Debugger for CLion
     libasound2-dev       ALSA headers + library (alsa/asoundlib.h, find_package(ALSA))
+    libusb-1.0-0-dev     Only for -DHAMPROOF_STATIC=ON: what a static Hamlib links
+    libudev-dev          against (libusb, and libudev, which libusb uses)
 
 Building minimodem (minimodem/install-dependencies-linux.sh)
     pkg-config           Lets ./configure find the libraries below

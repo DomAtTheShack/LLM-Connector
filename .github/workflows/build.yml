@@ -97,7 +97,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ninja-build pkg-config libasound2-dev libusb-1.0-0-dev
+          sudo apt-get install -y build-essential ninja-build pkg-config libasound2-dev libusb-1.0-0-dev libudev-dev
           # CMakeLists.txt asks for CMake 4.1 or newer, newer than Ubuntu's
           pipx install cmake
           cmake --version
