@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(wsl -e bash -c \"cd /mnt/c/Users/dooli/CLionProjects/HamProof && g++ -std=c++20 -Wall -Wextra -fsyntax-only main.cpp\")",
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
-    ]
-  }
-}
